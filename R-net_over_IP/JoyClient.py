@@ -123,10 +123,7 @@ class X360:
             return ('')
 
 
-        #jsdev = os.open(fn, 'rb', os.O_RDONLY|os.O_NONBLOCK)
-
         # Get the device name.
-        #buf = bytearray(63)
         buf = bytearray([0] * 64)
         ioctl(jsdev, 0x80006a13 + (0x10000 * len(buf)), buf) # JSIOCGNAME(len)
         js_name = buf
@@ -181,22 +178,23 @@ class X360:
         global joyx
         global joyy
         global rnet_threads_running
+
         while rnet_threads_running:
             try:
                 evbuf = jsdev.read(8)
-                jtime, jvalue, jtype, jnumber = struct.unpack('IhBB', evbuf)
+                _, jvalue, jtype, jnumber = struct.unpack('IhBB', evbuf)
                 if jtype & 0x02:
                     axis = self.axis_map[jnumber]
                     if (axis == 'x'):
-                            if abs(jvalue) > self.xthreshold:
-                                    joyx = 0x100 + int(jvalue * 100 / 128) >> 8 &0xFF
-                            else:
-                                    joyx = 0
+                        if abs(jvalue) > self.xthreshold:
+                            joyx = 0x100 + int(jvalue * 100 / 128) >> 8 &0xFF
+                        else:
+                            joyx = 0
                     elif (axis == 'y'):
-                            if abs(jvalue) > self.ythreshold:
-                                    joyy = 0x100 - int(jvalue * 100 / 128) >> 8 &0xFF
-                            else:
-                                    joyy = 0
+                        if abs(jvalue) > self.ythreshold:
+                            joyy = 0x100 - int(jvalue * 100 / 128) >> 8 &0xFF
+                        else:
+                            joyy = 0
 
             except:
                 print("Error reading joystick")
@@ -206,33 +204,33 @@ class X360:
 
 
     def get_joy_leftThumbXY(self, jsdev):
-            #r, w, e = select.select([ jsdev ], [], [], 0)
-            #for jsdev in r:
-            if True:
-                self.evbuf = jsdev.read(8)
-                if self.evbuf:
-                        jtime, jvalue, jtype, jnumber = struct.unpack('IhBB', self.evbuf)
+        if True:
+            self.evbuf = jsdev.read(8)
+            if self.evbuf:
+                jtime, jvalue, jtype, jnumber = struct.unpack('IhBB', self.evbuf)
 
-                        if jtype & 0x02 :
-                                axis = self.axis_map[jnumber]
-                                if axis:
-                                        fvalue = jvalue / 32767.0
-                                        self.axis_states[axis] = fvalue
-                                        if (axis == 'x'):
-                                                if abs(jvalue) > self.xthreshold:
-                                                        self.joyx = 0x100 + int(jvalue * 100 / 128) >> 8 &0xFF
-                                                else:
-                                                        self.joyx = 0
-                                        if (axis == 'y'):
-                                                if abs(jvalue) > self.ythreshold:
-                                                        self.joyy = 0x100 - int(jvalue * 100 / 128) >> 8 &0xFF
-                                                else:
-                                                        self.joyy = 0
+                # Joystick event type, based on linux/input.h
+                if jtype & 0x02:
+                    axis = self.axis_map[jnumber]
+                    if axis:
+                        fvalue = jvalue / 32767.0 # value in float
+                        self.axis_states[axis] = fvalue
+                        if (axis == 'x'):
+                            if abs(jvalue) > self.xthreshold:
+                                self.joyx = 0x100 + int(jvalue * 100 / 128) >> 8 & 0xFF
+                            else:
+                                self.joyx = 0
+                        if (axis == 'y'):
+                            if abs(jvalue) > self.ythreshold:
+                                self.joyy = 0x100 - int(jvalue * 100 / 128) >> 8 &0xFF
+                            else:
+                                self.joyy = 0
 
-                        self.outstr = self.dec2hex(self.joyx,2) + self.dec2hex(self.joyy,2)+'\n'
-            if debug:
-                    print('out:' + self.outstr)
-            return self.outstr.strip()
+                self.outstr = self.dec2hex(self.joyx,2) + self.dec2hex(self.joyy,2)+'\n'
+        if debug:
+                print('out:' + self.outstr)
+        return self.outstr.strip()
+    
 
     def socketjoyclientthread(self,conn,cansocket,ipsocket):
         global joyx
@@ -241,19 +239,18 @@ class X360:
 
         conn.send('x360(server) -> IP client -> canbus using RNET\n'.encode())
         timeout = 1
-        priorjoyx = joyx
-        priorjoyy = joyy
+
         priorspeedrange = 0
         speed_range = 0
         running = True
         lasttime = time()
         running = True
         while running and rnet_threads_running:
-            cread, cwrite, cerror = select.select([conn],[],[], timeout)
+            cread, _, _ = select.select([conn],[],[], timeout)
             if cread:
                 try:
                     evbuf = conn.recv(13)
-                    #print(str(evbuf))
+
                     if evbuf:
                         if evbuf[0:2].decode() == 'x:' and evbuf[4:6].decode() == 'y:':
                             joyx = int(evbuf[2:4],16) & 0xFF
@@ -262,7 +259,6 @@ class X360:
                             print('Invalid format from socket: '+str(evbuf))
                             joyx = 0
                             joyy = 0
-                            #running = False
 
                         if evbuf[8:10].decode() == 's:':
                             speed_range=int(evbuf[10:12],16)
@@ -316,8 +312,7 @@ def dec2hex(dec,hexlen):  #convert dec to hex with leading 0s and no '0x'
 def send_joystick_canframe(s,joy_id):
         mintime = .01
         nexttime = time() + mintime
-        priorjoyx=joyx
-        priorjoyy=joyy
+
         while rnet_threads_running:
                 joyframe = joy_id+'#'+dec2hex(joyx,2)+dec2hex(joyy,2)
                 cansend(s,joyframe)

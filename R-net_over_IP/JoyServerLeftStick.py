@@ -236,7 +236,7 @@ class X360:
                 try:
                         ev =  jsdev.read(8)
                         if len(ev) != 8:
-                            break;
+                            break
                         jtime, jvalue, jtype, jnumber = struct.unpack('IhBB', ev)
                         if jtype & 0x02:
                             axis = self.axis_map[jnumber]

@@ -18,17 +18,19 @@
 # You should have received a copy of the GNU General Public License
 # along with Foobar.  If not, see <http://www.gnu.org/licenses/>.
 
-import socket, sys, os, array, threading
+import sys, os, array, threading
 from time import *
 from fcntl import ioctl
 from can2RNET import *
 
-
 debug = True
 
+class Gamepad:
+    """
+    Translates USB gamepad joystick X/Y-position to R-Net compatible format
+    """
 
-#JoyLocal.py - Translate USB joystick x/y axis to Rnet and inject onto canbus
-class X360:
+    # TODO: Modify to fit current gamepad
 
     axis_map = []
     button_map = []
@@ -38,8 +40,6 @@ class X360:
     joystick_x = 0
     joystick_y = 0
 
-
-    # We'll store the states here.
     axis_states = {}
     button_states = {}
 
@@ -116,70 +116,75 @@ class X360:
     }
 
     def init_joystick(self):
+        """
+        Initialize the joystick device and return the file descriptor for the device.
+        Out of all joystick devices found, the first one is selected.
 
-        if debug:
-            # Iterate over the joystick devices.
-            print('Available devices:')
+        :return: file descriptor for the joystick device
+        """
+        js_list = []
+        print('---- Available gamepad devices ----')
+        for fn in os.listdir('/dev/input'):
+            if fn.startswith('js'):
+                js_list.append(fn)
+                print(f'\n/dev/input/{fn}')
 
-            for fn in os.listdir('/dev/input'):
-                if fn.startswith('js'):
-                    print('  /dev/input/%s' % (fn))
-
-        # Open the joystick device.
         try:
-            fn = '/dev/input/js0'
-            if debug:
-                print('Opening %s...' % fn)
+            fn = js_list[0]
+            print('Opening %s...' % fn)
             jsdev = open(fn, 'rb')
         except IOError:
             print ('No joystick at ' + fn)
             return ('')
 
-
-        #jsdev = os.open(fn, 'rb', os.O_RDONLY|os.O_NONBLOCK)
-
-        # Get the device name.
-        #buf = bytearray(63)
+        # Get device name
         buf = bytearray([0] * 64)
         ioctl(jsdev, 0x80006a13 + (0x10000 * len(buf)), buf) # JSIOCGNAME(len)
-        js_name = buf
+        print(f'Device name: {buf}')
 
-        if debug:
-            print('Device name: %s' % js_name)
-
-        # Get number of axes and buttons.
+        # Get number of axes
         buf = array.array('B', [0] )
         ioctl(jsdev, 0x80016a11, buf) # JSIOCGAXES
         num_axes = buf[0]
 
+        # Get number of buttons
         buf = array.array('B', [0] )
         ioctl(jsdev, 0x80016a12, buf) # JSIOCGBUTTONS
         num_buttons = buf[0]
 
-        # Get the axis map.
+        # Get axis map
         buf = array.array('B', [0] * 0x40)
         ioctl(jsdev, 0x80406a32, buf) # JSIOCGAXMAP
 
+        # Get button map
+        buf = array.array('H', [0] * 200)
+        ioctl(jsdev, 0x80406a34, buf) # JSIOCGBTNMAP
+
+        # Build axis map
         for axis in buf[:num_axes]:
             axis_name = self.axis_names.get(axis, 'unknown(0x%02x)' % axis)
             self.axis_map.append(axis_name)
             self.axis_states[axis_name] = 0.0
 
-        # Get the button map.
-        buf = array.array('H', [0] * 200)
-        ioctl(jsdev, 0x80406a34, buf) # JSIOCGBTNMAP
-
+        # Build button map
         for btn in buf[:num_buttons]:
             btn_name = self.button_names.get(btn, 'unknown(0x%03x)' % btn)
             self.button_map.append(btn_name)
             self.button_states[btn_name] = 0
 
-        if debug:
-            print ('%d axes found: %s' % (num_axes, ', '.join(self.axis_map)))
-            print ('%d buttons found: %s' % (num_buttons, ', '.join(self.button_map)))
+        print (f'{num_axes} Axes found: {',' .join(self.axis_map)}')
+        print (f'{num_buttons} buttons found: {', '.join(self.button_map)}')
+
         return (jsdev)
 
     def usb_joystick_read_thread(self, jsdev):
+        """
+        Read USB joystick input and update joystick_x and joystick_y values.
+
+        :param jsdev: file descriptor for the joystick device
+
+        :return: None
+        """
         global joystick_x
         global joystick_y
         global rnet_threads_running
@@ -187,28 +192,37 @@ class X360:
         while rnet_threads_running:
             try:
                 evbuf = jsdev.read(8)
-                jtime, jvalue, jtype, jnumber = struct.unpack('IhBB', evbuf)
+                _, jvalue, jtype, jnumber = struct.unpack('IhBB', evbuf)
 
                 if jtype & 0x02:
                     axis = self.axis_map[jnumber]
                     if (axis == 'x'):
-                            if abs(jvalue) > self.xthreshold:
-                                    joystick_x = 0x100 + int(jvalue * 100 / 128) >> 8 &0xFF
-                            else:
-                                    joystick_x = 0
+                        if abs(jvalue) > self.xthreshold:
+                            joystick_x = 0x100 + int(jvalue * 100 / 128) >> 8 &0xFF
+                        else:
+                            joystick_x = 0
                     elif (axis == 'y'):
-                            if abs(jvalue) > self.ythreshold:
-                                    joystick_y = 0x100 - int(jvalue * 100 / 128) >> 8 &0xFF
-                            else:
-                                    joystick_y = 0
+                        if abs(jvalue) > self.ythreshold:
+                            joystick_y = 0x100 - int(jvalue * 100 / 128) >> 8 &0xFF
+                        else:
+                            joystick_y = 0
 
             except:
-                print("Error reading USB: joystick")
+                print("Error reading gamepad")
                 joystick_x = 0
                 joystick_y = 0
                 rnet_threads_running = False
 
-def dec2hex(dec,hexlen):  #convert dec to hex with leading 0s and no '0x'
+
+def dec2hex(dec,hexlen):
+    """
+    Convert dec to hex with leading 0s and no '0x' prefix.
+
+    :param dec: decimal number to convert
+    :param hexlen: length of the hex string
+
+    :returns: hex string
+    """
     h=hex(int(dec))[2:]
     l=len(h)
     if h[l-1]=="L":
@@ -217,62 +231,94 @@ def dec2hex(dec,hexlen):  #convert dec to hex with leading 0s and no '0x'
         h= '0'+hex(int(dec))[1:]
     return ('0'*hexlen+h)[l:l+hexlen]
 
-def induce_JSM_error(cansocket):
-    for i in range(0,3):
-        cansend(cansocket,'0c000000#')
 
-def RNET_JSMerror_exploit(cansocket):
-    print("Waiting for JSM heartbeat")
+def RNET_JSMerror_exploit(cansocket, joy_id):
+    """
+    Send JSM error exploit CAN message to disable on-board joystick.
+
+    :param cansocket: socket for sending CAN messages
+
+    :returns: Joystick ID, used as a reference for sending joystick CAN messages
+    """
+    print("Waiting for JSM heartbeat...")
     canwait(cansocket,"03C30F0F:1FFFFFFF")
+
     t=time()+0.20
 
-    print("Waiting for joy frame")
+    print("Waiting for joy frame...")
     joy_id = wait_rnet_joystick_frame(cansocket,t)
     print("Using joy frame: "+joy_id)
 
-    induce_JSM_error(cansocket)
-    print("3 x 0c000000# sent")
+    for _ in range(0,3):
+        cansend(cansocket,'0c000000#')
 
     return(joy_id)
 
-#THREAD: sends RnetJoyFrame every mintime seconds
-def send_joystick_canframe(s,joy_id):
-    mintime = .01
+# TODO: Replace this with ROS publisher
+def send_joystick_canframe(can_socket, joy_id):
+    """
+    Publishes joystick CAN frame every 10ms. Runs on a separate thread.
+
+    :param can_socket: socket for sending CAN messages
+    :param joy_id: Joystick ID, used as a reference for sending joystick CAN messages
+
+    :return: None
+    """
+    mintime = 0.01
     nexttime = time() + mintime
-    priorjoystick_x=joystick_x
-    priorjoystick_y=joystick_y
+    
     while rnet_threads_running:
-        joyframe = joy_id+'#'+dec2hex(joystick_x,2)+dec2hex(joystick_y,2)
-        cansend(s,joyframe)
+        joyframe = joy_id + '#' + dec2hex(joystick_x, 2) + dec2hex(joystick_y, 2)
+        cansend(can_socket,joyframe)
+
         nexttime += mintime
-        t= time()
+        t = time()
+
         if t < nexttime:
             sleep(nexttime - t)
         else:
             nexttime += mintime
 
-#THREAD: Waits for joyframe and injects another spoofed frame ASAP
-def inject_rnet_joystick_frame(can_socket, rnet_joystick_id):
-	rnet_joystick_frame_raw = build_frame(rnet_joystick_id + "#0000") #prebuild the frame we are waiting on
-	while rnet_threads_running:
-		cf, addr = can_socket.recvfrom(16)
-		if cf == rnet_joystick_frame_raw:
-			cansend(can_socket, rnet_joystick_id + '#' + dec2hex(joystick_x, 2) + dec2hex(joystick_y, 2))
+# TODO: Replace this with ROS publisher
+def inject_rnet_joystick_frame(can_socket, joy_id):
+    """
+    Waits for joyframe and injects another spoofed frame ASAP. Runs on a separate thread.
+
+    :param can_socket: socket for sending and receiving CAN messages
+    :param joy_id: Joystick ID, used as a reference for sending joystick CAN messages
+
+    :return: None
+    """
+    rnet_joystick_frame_raw = build_frame(joy_id + "#0000")
+    
+    while rnet_threads_running:
+        cf, _ = can_socket.recvfrom(16)
+        if cf == rnet_joystick_frame_raw:
+            cansend(can_socket, joy_id + '#' + dec2hex(joystick_x, 2) + dec2hex(joystick_y, 2))
 
 
-#Waits for any frame containing a Joystick position
-#Returns: JoyFrame extendedID as text
 def wait_rnet_joystick_frame(can_socket, start_time):
+    """
+    Waits for a frame send by joystick. Extracts the frame ID and returns it.
+    If no frame is found within the timeout, 'Err!' is returned.
+
+    :param can_socket: socket for sending and receiving CAN messages
+    :param start_time: start time for the wait
+
+    :return: Joystick frame extendedID or 'Err!'
+    """
     frameid = ''
 
-    while frameid[0:3] != '020':  #just look for joystick frame ID (no extended frame)
-        cf, addr = can_socket.recvfrom(16) #this is a blocking read.... so if there is no canbus traffic it will sit forever (to fix!)
+    while frameid[0:3] != '020':  # joystick frame ID (no extended frame)
+        cf, _ = can_socket.recvfrom(16) # Blocking if no CANBUS traffic
         candump_frame = dissect_frame(cf)
         frameid = candump_frame.split('#')[0]
         if time() > start_time:
-             print("JoyFrame wait timed out ")
-             return('Err!')
+            print("Joystick frame wait timed out...")
+            return('Err!')
+        
     return(frameid)
+
 
 #Set speed_range: 0% - 100%
 def RNETsetSpeedRange(cansocket,speed_range):
@@ -281,82 +327,96 @@ def RNETsetSpeedRange(cansocket,speed_range):
     else:
         print('Invalid RNET SpeedRange: ' + str(speed_range))
 
+
 def RNETshortBeep(cansocket):
+    """
+    Plays a short beep sound on the wheelchair.
+
+    :param cansocket: socket for sending CAN messages
+
+    :return: None
+    """
     cansend(cansocket,"181c0100#0260000000000000")
 
-#Play little song
+
 def RNETplaysong(cansocket):
+    """
+    Plays a song on the wheelchair. 
+
+    :param cansocket: socket for sending CAN messages
+
+    :return: None
+    """
     cansend(cansocket,"181C0100#2056080010560858")
     sleep(.77)
     cansend(cansocket,"181C0100#105a205b00000000")
 
-#do very little and output something as sign-of-life
+
+# TODO: Possibly remove when ROS publisher is implemented
 def watch_and_wait():
+    """
+    Monitors joystick position and active threads. Prints joystick position and active threads every 0.5s.
+
+    :return: None
+    """
     started_time = time()
     while threading.active_count() > 0 and rnet_threads_running:
         sleep(0.5)
         print(str(round(time()-started_time,2))+'\tX: '+dec2hex(joystick_x,2)+'\tY: '+dec2hex(joystick_y,2)+ '\tThreads: '+str(threading.active_count()))
 
-#does not use a thread queue.  Instead just sets a global flag.
+
 def kill_rnet_threads():
+    """
+    Sets global variable rnet_threads_running to False, stopping all threads.
+
+    :return: None
+    """
     global rnet_threads_running
     rnet_threads_running = False
 
-# Makes sure that gamepad is centered.
+
 def check_usb_gamepad_center():
+    """
+    Checks if the joystick is centered. If not, waits until the joystick is centered.
+
+    :return: None
+    """
     print('waiting for joystick to be centered')
     while (joystick_x !=0 or joystick_y !=0):
         print('joystick not centered')
 
+
 def selectControlExploit(can_socket):
-    user_selection = int(input("Select exploit to use: \n \n 1. Disable R-Net Joystick temporary. (Allows for better control) \n 2. Allow R-Net Joystick (Will see some lag, but is more safe.)\n"))
+    user_selection = int(input("Select exploit to use: \n \n 1. Disable R-Net Joystick temporarily. (Lower latency) \n 2. Allow R-Net Joystick (Latency))\n"))
+    
+    start_time = time() + .20 # TODO: Many parts of the code use this. Replace with variable local to function
+    print('Waiting for RNET-Joystick frame...')
 
+    # Wait for RNET-Joystick frame to be sent by the joystick
+    rnet_joystick_id = wait_rnet_joystick_frame(can_socket, start_time)
+    if rnet_joystick_id == 'Err!':
+        print('No RNET-Joystick frame seen within minimum time... Aborting...')
+        return
+    
+    print('Found RNET-Joystick frame: ' + rnet_joystick_id)
 
-    if (user_selection == 1):
-        print("\n You chose to disable the R-Net Joystick temporary. Restart the chair to fix. ")
-        start_time = time() + .20
-        print('Waiting for RNET-Joystick frame')
+    if user_selection == 1:
+        # Send JSM error exploit to disable on-board joystick
+        print("\nYou chose to disable the R-Net Joystick temporary. Restart the chair to enable it again.")
+        rnet_joystick_id = RNET_JSMerror_exploit(can_socket, rnet_joystick_id)
+    elif user_selection == 2:
+        print("\nYou chose to allow the R-Net Joystick. The joystick will be used to control the chair.")
 
-        rnet_joystick_id = wait_rnet_joystick_frame(can_socket, start_time) #t=timeout time
-        if rnet_joystick_id == 'Err!':
-            print('No RNET-Joystick frame seen within minimum time')
-            sys.exit()
-        print('Found RNET-Joystick frame: ' + rnet_joystick_id)
+    # Initialize chair to lowest speed setting
+    chair_speed_range = 00
+    RNETsetSpeedRange(can_socket, chair_speed_range)
 
-        # set chair's speed to the lowest setting.
-        chair_speed_range = 00
-        RNETsetSpeedRange(can_socket, chair_speed_range)
-
-        rnet_joystick_id = RNET_JSMerror_exploit(can_socket)
-
-        sendjoyframethread = threading.Thread(
-            target=send_joystick_canframe,
-            args=(can_socket,rnet_joystick_id,),
-            daemon=True)
-        sendjoyframethread.start()
-    elif (user_selection == 2):
-        print("\n You chose to allow the R-Net Joystick.")
-        start_time = time() + .20
-        print('Waiting for RNET-Joystick frame')
-
-        rnet_joystick_id = wait_rnet_joystick_frame(can_socket, start_time) #t=timeout time
-        if rnet_joystick_id == 'Err!':
-            print('No RNET-Joystick frame seen within minimum time')
-            sys.exit()
-        print('Found RNET-Joystick frame: ' + rnet_joystick_id)
-
-
-        # set chair's speed to the lowest setting.
-        chair_speed_range = 00
-        RNETsetSpeedRange(can_socket, chair_speed_range)
-
-
-        inject_rnet_joystick_frame_thread = threading.Thread(
-            target=inject_rnet_joystick_frame,
-            args=(can_socket, rnet_joystick_id,),
-            daemon=True)
-        inject_rnet_joystick_frame_thread.start()
-
+    sendjoyframethread = threading.Thread(
+        target=send_joystick_canframe,
+        args=(can_socket,rnet_joystick_id),
+        daemon=True
+    )
+    sendjoyframethread.start()
 
 
 if __name__ == "__main__":
@@ -367,7 +427,7 @@ if __name__ == "__main__":
     can_socket = opencansocket(0)
 
     #init usb joystick
-    x360 = X360()
+    x360 = Gamepad()
     usb_joystick_dev = x360.init_joystick()
     joystick_x = 0
     joystick_y = 0
@@ -389,6 +449,5 @@ if __name__ == "__main__":
     else:
         print('No Joystick found.')
         kill_rnet_threads()
-
 
     print("Exiting")
