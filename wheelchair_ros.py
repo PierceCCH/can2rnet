@@ -1,5 +1,6 @@
 import rospy
 import threading
+import sys
 
 from sensor_msgs.msg import Joy
 from can2RNET import *
@@ -9,6 +10,20 @@ from time import sleep, time
 joystick_X = 0
 joystick_Y = 0
 rnet_threads_running = True
+
+
+def signal_handler(sig, frame):
+    """
+    Signal handler to stop the wheelchair controller.
+
+    :param sig: signal number
+    :param frame: current stack frame
+    """
+    print("Interrupt signal received. Stopping wheelchair controller...")
+    global rnet_threads_running
+    rnet_threads_running = False
+    rospy.signal_shutdown("Node closed...")
+    sys.exit(0)
 
 
 def dec_to_hex(dec, hexlen):
@@ -43,7 +58,7 @@ def joy_callback(msg):
         rospy.logerr("Joystick axes index out of range")
 
 
-def send_joystick_canframe():
+def send_joystick_canframe(can_socket, joy_id):
     """
     Publishes joystick CAN frame every 10ms.
 
@@ -54,11 +69,9 @@ def send_joystick_canframe():
     nexttime = time() + mintime
 
     while rnet_threads_running and not rospy.is_shutdown():
-        # joyframe = joy_id + '#' + dec_to_hex(joystick_X, 2) + dec_to_hex(joystick_Y, 2)
-        # cansend(can_socket, joyframe)
-
-        print("We did it")
-        print(joystick_X, joystick_Y)
+        joyframe = joy_id + '#' + dec_to_hex(joystick_X, 2) + dec_to_hex(joystick_Y, 2)
+        print("Sending joystick_X: ", joystick_X, " joystick_Y: ", joystick_Y)
+        cansend(can_socket, joyframe)
 
         nexttime += mintime
         t = time()
@@ -66,6 +79,26 @@ def send_joystick_canframe():
             sleep(nexttime - t)
         else:
             nexttime += mintime
+
+
+def disable_rnet_joystick(can_socket):
+    """
+    Send JSM error exploit CAN message to disable on-board joystick.
+
+    :param can_socket: socket for sending CAN messages
+
+    :returns: True if successful, False otherwise
+    """
+    print("Waiting for JSM heartbeat...")
+    canwait(can_socket,"03C30F0F:1FFFFFFF")
+
+    try:
+        for _ in range(0,3):
+            cansend(can_socket,'0c000000#')
+        return True
+    except:
+        print("Error sending JSM exploit message.")
+        return False
 
 
 def wait_rnet_joystick_frame(can_socket):
@@ -93,7 +126,7 @@ def wait_rnet_joystick_frame(can_socket):
     return frameid
 
 
-def joystick_spoofing():
+def joystick_spoofing(can_socket):
     """
     Handles R-Net joystick spoofing.
 
@@ -104,13 +137,16 @@ def joystick_spoofing():
     rospy.loginfo("Waiting for R-net joystick frame...")
 
     try:
-        # joystick_ID = wait_rnet_joystick_frame(can_socket)
+        joystick_ID = wait_rnet_joystick_frame(can_socket)
         rospy.loginfo(f"Found R-net joystick frame: {0}")
+        if not disable_rnet_joystick(can_socket):
+            rospy.logerr("Failed to disable R-net joystick. Aborting...")
+            return
 
         # Start thread to send joystick CAN frames
         spoof_thread = threading.Thread(
             target=send_joystick_canframe, 
-            # args=(can_socket, joystick_ID), 
+            args=(can_socket, joystick_ID), 
             daemon=True
         )
         spoof_thread.start()
@@ -152,16 +188,16 @@ def main():
     rospy.init_node("wheelchair_controller")
     rospy.Subscriber("/joy_input", Joy, joy_callback)
 
-    # can_socket = opencansocket(0)
+    can_socket = opencansocket(0)
 
     try:
-        joystick_spoofing()
+        joystick_spoofing(can_socket)
         rospy.spin()
     except rospy.ROSInterruptException:
         rospy.loginfo("Shutting down node...")
     finally:
         rnet_threads_running = False
-        # can_socket.close()
+        can_socket.close()
         rospy.loginfo("CAN socket closed.")
 
 
